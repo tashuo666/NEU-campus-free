@@ -5476,8 +5476,6 @@ proxy-providers:
       url: https://www.gstatic.com/generate_204
       interval: 300
 
-proxies:
-
 # 广告屏蔽规则集必须放在 rule-providers；proxy-providers 仅用于代理节点
 rule-providers:
   reject:
