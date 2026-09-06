@@ -1,6 +1,6 @@
 # 修复了开始配置是会出现 443 行代码出现错误的现象
 # 修复配置完成后脚本将 reject 错误放在了 proxy-providers 下导致clash无法启动
-
+# 命令改为 bash <(curl -fsSL https://raw.githubusercontent.com/tashuo666/NEU-campus-free/main/sing-box.sh)
 
 # 校园网 IPv6 免流搭建教程
 
