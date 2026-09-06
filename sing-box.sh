@@ -2232,9 +2232,11 @@ check_install() {
       local ONLINE=$(get_sing_box_version)
       local SB_DIR="$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH"
       local SB_BIN="$SB_DIR/sing-box"
-      wget --no-check-certificate --continue \
-        ${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz \
-        -qO- | tar xz -C $TEMP_DIR 2>/dev/null
+      local SB_ARCHIVE="$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz"
+      if download_sing_box_archive "$ONLINE" "$SB_ARCHIVE"; then
+        tar xzf "$SB_ARCHIVE" -C "$TEMP_DIR" 2>/dev/null
+      fi
+      rm -f "$SB_ARCHIVE"
       [ -s "$SB_BIN" ] && [ -x "$SB_BIN" ] && mv "$SB_BIN" "$TEMP_DIR/sing-box" && chmod +x "$TEMP_DIR/sing-box"
     } &
 
@@ -2484,6 +2486,40 @@ get_sing_box_version() {
     fi
   fi
   echo "$RESULT_VERSION"
+}
+
+# 下载并校验 Sing-box 压缩包；任一地址失败后自动切换到下一个地址。
+# 可通过环境变量覆盖完整地址，支持 {version} 和 {arch} 占位符。
+download_sing_box_archive() {
+  local version=$1 archive=$2 url proxy custom_url
+  local asset="sing-box-${version}-linux-${SING_BOX_ARCH}.tar.gz"
+  local urls=()
+
+  custom_url="${SING_BOX_DOWNLOAD_URL:-}"
+  if [ -n "$custom_url" ]; then
+    custom_url=${custom_url//\{version\}/$version}
+    custom_url=${custom_url//\{arch\}/$SING_BOX_ARCH}
+    urls+=("$custom_url")
+  fi
+
+  [ -n "${GH_PROXY:-}" ] && urls+=("${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v${version}/${asset}")
+  for proxy in "${GITHUB_PROXY[@]}"; do
+    [ "$proxy" = "${GH_PROXY:-}" ] && continue
+    urls+=("${proxy}https://github.com/SagerNet/sing-box/releases/download/v${version}/${asset}")
+  done
+  urls+=("https://github.com/SagerNet/sing-box/releases/download/v${version}/${asset}")
+
+  for url in "${urls[@]}"; do
+    rm -f "$archive"
+    info "\n $(text 48): $url "
+    if wget --no-check-certificate --timeout=20 --tries=2 --waitretry=3 -qO "$archive" "$url" \
+      && [ -s "$archive" ] && tar tzf "$archive" >/dev/null 2>&1; then
+      return 0
+    fi
+    warning "\n $(text 49): $url "
+  done
+  rm -f "$archive"
+  return 1
 }
 
 # 添加端口跳跃
@@ -6729,7 +6765,11 @@ version() {
 
   if [ "${UPDATE,,}" = 'y' ]; then
     check_system_info
-    wget --no-check-certificate --continue ${GH_PROXY}https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz -qO- | tar xz -C $TEMP_DIR sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box
+    local SB_ARCHIVE="$TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH.tar.gz"
+    if download_sing_box_archive "$ONLINE" "$SB_ARCHIVE"; then
+      tar xzf "$SB_ARCHIVE" -C "$TEMP_DIR" "sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box"
+    fi
+    rm -f "$SB_ARCHIVE"
 
     [ -s $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box ] || error "\n $(text 42) \n"
     if ! $TEMP_DIR/sing-box-$ONLINE-linux-$SING_BOX_ARCH/sing-box check -C ${WORK_DIR}/conf >/dev/null; then
@@ -7165,4 +7205,5 @@ else
   menu_setting
   menu
 fi
+
 
