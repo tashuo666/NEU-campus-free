@@ -439,8 +439,15 @@ done
 unset TEXT_I
 
 # text <index>：输出当前语言对应的字符串，含 $ 变量的条目用 eval 展开，其余直接 printf
+# 注意：text() 有可能在 select_language() 之前被调用（例如 check_root 的报错、旧版本配置
+# 迁移里的 export_list / cmd_systemctl），此时 L 为空；另外 ${WORK_DIR}/language 里若混入
+# 空白或 CRLF，L 也会变成非法的数组名。这都会让 local -n 抛出 "not a valid identifier"。
+# 因此在建立 nameref 之前先把语言归一化：只接受 E / C，其余一律回退到英文数组 E。
+# 这里只使用局部副本 TEXT_LANG，不去改写全局 L，以免影响 select_language 的交互判断。
 text() {
-  local -n TEXT_ARR="${L}"        # nameref 指向 E 或 C，零子进程
+  local TEXT_LANG="${L}"
+  [[ "$TEXT_LANG" == 'E' || "$TEXT_LANG" == 'C' ]] || TEXT_LANG=E
+  local -n TEXT_ARR="${TEXT_LANG}"   # nameref 指向 E 或 C，零子进程
   local TEXT_VAL="${TEXT_ARR[$*]}"
   if [[ -n "${TEXT_NEEDS_EVAL[$*]}" ]]; then
     eval "printf '%s' \"${TEXT_VAL}\""
@@ -568,6 +575,9 @@ statistics_of_run_times() {
 }
 
 # 选择中英语言
+# L 只允许取 E / C，它会被 text() 直接当作 nameref 的数组名使用，所以结尾统一归一化：
+# 去除 ${WORK_DIR}/language 或 -F 配置文件里可能夹带的空白 / CRLF，并统一大写。
+# 判断是否需要交互选择仍看 L 是否为空，归一化放在最后，保证两者互不干扰。
 select_language() {
   if [ -z "$L" ]; then
     if [ -s ${WORK_DIR}/language ]; then
@@ -577,6 +587,8 @@ select_language() {
       [ "$LANGUAGE" = 2 ] && L=C
     fi
   fi
+  L="$(tr -d '[:space:]' <<< "${L^^}")"
+  [ "$L" = 'C' ] || L=E
 }
 
 # 字母与数字的 ASCII 码值转换
@@ -6897,6 +6909,38 @@ menu() {
 check_cdn
 statistics_of_run_times update sing-box.sh 2>/dev/null
 
+# 传参
+[[ "${*^^}" =~ '-E'|'-K' ]] && L=E
+[[ "${*^^}" =~ '-C'|'-B'|'-L' ]] && L=C
+# 支持在 select_language 前识别 --LANGUAGE，避免 KV 无交互安装仍弹出语言选择。
+for ((PARAM_I=1; PARAM_I<=$#; PARAM_I++)); do
+  eval "PARAM_V=\${${PARAM_I}}"
+  case "${PARAM_V^^}" in
+    --LANGUAGE )
+      PARAM_N=$((PARAM_I+1))
+      eval "PARAM_LANG=\${${PARAM_N}}"
+      [[ "${PARAM_LANG^^}" =~ ^C ]] && L=C || L=E
+      ;;
+    --LANGUAGE=* )
+      PARAM_LANG="${PARAM_V#*=}"
+      [[ "${PARAM_LANG^^}" =~ ^C ]] && L=C || L=E
+      ;;
+  esac
+done
+unset PARAM_I PARAM_V PARAM_N PARAM_LANG
+
+# 获取 -F 参数的值
+CONFIG_FILE=$(awk '-F[ =]' 'tolower($1) ~ /^-f$/{print $2}' <<< "$*")
+if [[ -n "$CONFIG_FILE" && -s "$CONFIG_FILE" ]]; then
+  NONINTERACTIVE_INSTALL=noninteractive_install
+  . $CONFIG_FILE
+  L=${LANGUAGE^^}
+  [ "$ARGO" = 'true' ] && IS_ARGO=is_argo || IS_ARGO=no_argo
+  [ "$SUBSCRIBE" = 'true' ] && IS_SUB=is_sub || IS_SUB=no_sub
+fi
+
+select_language
+check_root
 ###### 为了给旧版本 04_experimental.json 补全 clash_api 配置并剥离 v2ray_api，将于 2026年12月31日移除
 if [ -x "$WORK_DIR/jq" ] && [ -s "$WORK_DIR/conf/04_experimental.json" ] && [ -x "$WORK_DIR/sing-box" ] && [[ "$(date +%Y%m%d)" < "20261231" ]]; then
   # 旧版本 04_experimental.json 可能缺 clash_api、或含 v2ray_api（旧版脚本注入的）。
@@ -6917,8 +6961,9 @@ if [ -x "$WORK_DIR/jq" ] && [ -s "$WORK_DIR/conf/04_experimental.json" ] && [ -x
     fi
     [ -s "$TEMP_DIR/exp_clash_api_tmp.json" ] && mv "$TEMP_DIR/exp_clash_api_tmp.json" "$WORK_DIR/conf/04_experimental.json" && {
       # 修改了 experimental 配置，用 SIGHUP 热加载使 API 监听生效（PID 不变，SSH 连接不断）。
-      # 此处在 check_system_info() 之前（SYSTEM 未设置）且 select_language() 之前（L 未设置），
-      # 注意：不能调用 cmd_systemctl reload——其成功分支会调用 info/text（nameref 依赖 L），
+      # 此处仍在 check_system_info() 之前（SYSTEM 未设置），因此不能调用 cmd_systemctl reload——
+      # 它内部的 [ "$SYSTEM" = 'Alpine' ] 判断会因 SYSTEM 为空而错误地走 systemd 分支。
+      # （语言 L 已由前面的 select_language() 初始化，text() 可正常使用。）
       # 与 Alpine 分支直接 kill -HUP 对称。前台同步执行确保信号送达（SIGHUP 不断连 SSH）。
       if [ -d /run/openrc ] || command -v rc-service >/dev/null 2>&1; then
         # Alpine：kill -HUP 主进程（与 cmd_systemctl reload 的 Alpine 分支一致）；PID 不存在时降级 restart。
@@ -6950,38 +6995,6 @@ if [ -s $WORK_DIR/nginx.conf ] && grep -q 'Neko|Throne' $WORK_DIR/nginx.conf; th
   export_list >/dev/null 2>&1
 fi
 
-# 传参
-[[ "${*^^}" =~ '-E'|'-K' ]] && L=E
-[[ "${*^^}" =~ '-C'|'-B'|'-L' ]] && L=C
-# 支持在 select_language 前识别 --LANGUAGE，避免 KV 无交互安装仍弹出语言选择。
-for ((PARAM_I=1; PARAM_I<=$#; PARAM_I++)); do
-  eval "PARAM_V=\${${PARAM_I}}"
-  case "${PARAM_V^^}" in
-    --LANGUAGE )
-      PARAM_N=$((PARAM_I+1))
-      eval "PARAM_LANG=\${${PARAM_N}}"
-      [[ "${PARAM_LANG^^}" =~ ^C ]] && L=C || L=E
-      ;;
-    --LANGUAGE=* )
-      PARAM_LANG="${PARAM_V#*=}"
-      [[ "${PARAM_LANG^^}" =~ ^C ]] && L=C || L=E
-      ;;
-  esac
-done
-unset PARAM_I PARAM_V PARAM_N PARAM_LANG
-
-# 获取 -F 参数的值
-CONFIG_FILE=$(awk '-F[ =]' 'tolower($1) ~ /^-f$/{print $2}' <<< "$*")
-if [[ -n "$CONFIG_FILE" && -s "$CONFIG_FILE" ]]; then
-  NONINTERACTIVE_INSTALL=noninteractive_install
-  . $CONFIG_FILE
-  L=${LANGUAGE^^}
-  [ "$ARGO" = 'true' ] && IS_ARGO=is_argo || IS_ARGO=no_argo
-  [ "$SUBSCRIBE" = 'true' ] && IS_SUB=is_sub || IS_SUB=no_sub
-fi
-
-check_root
-select_language
 check_system_info
 check_brutal
 
