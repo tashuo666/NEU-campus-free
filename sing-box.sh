@@ -2714,22 +2714,36 @@ check_system_ip() {
   [ -z "$WAN6" ] && { detect_all_ips; STATIC_IPV6=$(printf '%s\n' "${DETECTED_IPS[@]}" | grep ':' | grep -vE '^f[cd]' | tr '\n' ' '); }
 }
 
-# 检测本机网卡上所有静态 IPv4 / IPv6 地址（含内网），供用户确认后作为连接目标
+# 检测可作为客户端连接目标的公网 IPv4 / IPv6 地址。
+# 云服务器常见 EIP/NAT 场景中，网卡只有 10.x 地址，公网地址由 check_system_ip() 探测得到。
 detect_all_ips() {
   DETECTED_IPS=()
-  # 所有网卡 IPv4 global 地址（含内网 10/8、172.16/12、192.168/16），排除 loopback / link-local
+
+  add_detected_ip() {
+    local candidate=$1 existing
+    [ -z "$candidate" ] && return
+    for existing in "${DETECTED_IPS[@]}"; do
+      [ "$existing" = "$candidate" ] && return
+    done
+    DETECTED_IPS+=("$candidate")
+  }
+
+  # 优先使用外部服务探测到的公网地址，适配公网 EIP 映射到内网网卡的云服务器。
+  [[ "$WAN4" =~ ^([1-9]?[0-9]{1,2}\.){3}[0-9]{1,3}$ && ! "$WAN4" =~ ^10\. && ! "$WAN4" =~ ^192\.168\. && ! "$WAN4" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. && ! "$WAN4" =~ ^100\.(6[4-9]|[7-9][0-9])\. ]] && add_detected_ip "$WAN4"
+
+  # 网卡上的公网 IPv4 作为备用；排除 RFC1918、CGNAT、回环和链路本地地址。
   while IFS= read -r addr; do
-    [[ "$addr" =~ ^127\. ]] && continue
-    [[ "$addr" =~ ^169\.254\. ]] && continue
-    DETECTED_IPS+=("$addr")
+    [[ "$addr" =~ ^127\. || "$addr" =~ ^169\.254\. || "$addr" =~ ^10\. || "$addr" =~ ^192\.168\. || "$addr" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. || "$addr" =~ ^100\.(6[4-9]|[7-9][0-9])\. ]] && continue
+    add_detected_ip "$addr"
   done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | sed 's#/.*##')
 
-  # 所有网卡 IPv6 global 地址（含 ULA fc00::/7），排除 loopback / link-local / multicast / 动态临时地址(dynamic mngtmpaddr)
+  # 优先使用外部服务探测到的公网 IPv6。
+  [[ -n "$WAN6" && ! "$WAN6" =~ ^[fF][cCdD] && ! "$WAN6" =~ ^fe80: && ! "$WAN6" =~ ^ff ]] && add_detected_ip "$WAN6"
+
+  # 网卡上的公网 IPv6 作为备用，排除 ULA / link-local / multicast / 临时地址。
   while IFS= read -r addr; do
-    [[ "$addr" =~ ^::1$ ]] && continue
-    [[ "$addr" =~ ^fe80: ]] && continue
-    [[ "$addr" =~ ^ff ]] && continue
-    DETECTED_IPS+=("$addr")
+    [[ "$addr" =~ ^::1$ || "$addr" =~ ^[fF][cCdD] || "$addr" =~ ^fe80: || "$addr" =~ ^ff ]] && continue
+    add_detected_ip "$addr"
   done < <(ip -6 -o addr show scope global 2>/dev/null | grep -v 'dynamic' | awk '{print $4}' | sed 's#/.*##')
 }
 
